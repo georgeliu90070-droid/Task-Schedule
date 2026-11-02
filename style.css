@@ -129,3 +129,18 @@ button:disabled{opacity:.55;cursor:wait}
 .sync-panel button{flex-shrink:0}
 .local-status{line-height:1.7}
 @media(max-width:640px){.sync-panel{align-items:stretch;flex-direction:column;padding:13px}.sync-panel button{align-self:flex-start}}
+
+/* 外部日曆另用紫色標示，連線設定在手機上也維持清楚的單欄排列。 */
+.icloud-panel{border:1px solid #e2e3e5;background:#fafafa;border-radius:9px;padding:14px 16px;margin-bottom:20px}
+.icloud-status-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.icloud-panel p,.icloud-panel small{font-size:11px;line-height:1.9;color:var(--muted)}
+.icloud-status-row p{margin:0}
+.icloud-panel summary{cursor:pointer;font-size:12px;margin-top:12px;color:var(--ink)}
+.icloud-panel a{color:#62518c;text-decoration:underline;text-underline-offset:3px}
+.icloud-panel form{max-width:480px;margin-top:18px}
+.icloud-consent{display:flex;align-items:flex-start;gap:9px;font-size:11px;line-height:1.9;margin:16px 0}
+.icloud-consent input{flex-shrink:0;margin-top:5px}
+.icloud-panel .icloud-note{font-size:10px;margin:16px 0 0}
+.calendar-event.icloud-event{display:block;background:#f1edf7;border-left:3px solid #786191;color:#59436e;cursor:default}
+.calendar-agenda-row .icloud-event{white-space:normal;overflow-wrap:anywhere}
+@media(max-width:640px){.icloud-panel{padding:12px}.icloud-panel .form-field{margin:12px 0}.icloud-panel input,.icloud-panel select{font-size:16px}}

@@ -8,6 +8,12 @@ let 雲端服務 = null;
 let 雲端就緒 = false;
 let 啟動中 = false;
 let 同步中 = false;
+let iCloud已連線 = false;
+let iCloud處理中 = false;
+let iCloud行程 = [];
+let iCloud載入月份 = '';
+let iCloud最後請求 = 0;
+let iCloud重試計時器;
 const 待同步 = { tasks: new Set(), transactions: new Set(), notes: new Set(), expenseCategories: new Set() };
 let 上次本機資料 = { tasks: [], transactions: [], notes: [], expenseCategories: [] };
 let 問卷處理中 = false;
@@ -26,7 +32,7 @@ const 今天 = new Date();
 const 日期字串 = (日期 = new Date()) => `${日期.getFullYear()}-${String(日期.getMonth() + 1).padStart(2, '0')}-${String(日期.getDate()).padStart(2, '0')}`;
 const 金額文字 = (金額) => `${金額 < 0 ? '−' : ''}$${Math.abs(金額).toLocaleString('zh-TW', { maximumFractionDigits: 2 })}`;
 // 使用文字節點處理使用者內容，避免筆記被當成網頁程式執行。
-const 安全文字 = (文字) => { const 容器 = document.createElement('span'); 容器.textContent = 文字; return 容器.innerHTML; };
+const 安全文字 = (文字) => { const 容器 = document.createElement('span'); 容器.textContent = 文字; return 容器.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;'); };
 const 新識別碼 = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 let 資料 = { tasks: [], transactions: [], notes: [], expenseCategories: [] };
 let 目前頁面 = '總覽';
@@ -189,6 +195,13 @@ async function 啟動雲端() {
     }
     if (!身分?.user?.is_anonymous) throw new Error('無法取得訪客身分');
     const 上次訪客 = localStorage.getItem('日常上次訪客');
+    if (訪客識別碼 !== 身分.user.id) {
+      iCloud已連線 = false;
+      iCloud行程 = [];
+      iCloud載入月份 = '';
+      取元素('#icloud-form').reset();
+      設定iCloud狀態('正在確認此訪客的 iCloud 連線…');
+    }
     訪客識別碼 = 身分.user.id;
     本機儲存鍵 = `${儲存鍵}-${訪客識別碼}`;
     // 新訪客不會自動取得上一個訪客的快取；初次使用才轉入原本本機資料。
@@ -212,6 +225,7 @@ async function 啟動雲端() {
     更新畫面();
     雲端就緒 = true;
     await 同步生活資料();
+    讀取iCloud連線();
   } catch (錯誤) { 設定同步狀態(雲端錯誤文字(錯誤), true); }
   finally { 啟動中 = false; }
 }
@@ -291,21 +305,28 @@ function 更新行事曆() {
   // 先依日期分組，避免每畫一格都重新搜尋所有待辦。
   const 日期分組 = new Map();
   顯示待辦.forEach((事項) => { if (!日期分組.has(事項.date)) 日期分組.set(事項.date, []); 日期分組.get(事項.date).push(事項); });
+  const 蘋果分組 = iCloud日期分組();
   const 行程按鈕 = (事項) => `<button class="calendar-event ${事項.done ? 'complete' : ''}" data-edit="task" data-id="${事項.id}" title="${安全文字(事項.title)}" aria-label="編輯${事項.done ? '已完成' : '未完成'}待辦：${安全文字(事項.title)}">${事項.done ? '✓ ' : ''}${安全文字(事項.title)}</button>`;
   取元素('#calendar-days').innerHTML = 取得月曆日期(行事曆月份).map((日期) => {
     const 日期文字 = 日期字串(日期);
     const 當天事項 = 日期分組.get(日期文字) || [];
+    const 當天蘋果 = 蘋果分組.get(日期文字) || [];
+    const 顯示行程 = [...當天事項.map(行程按鈕), ...當天蘋果.map(iCloud行程標籤)];
     const 非本月 = 日期.getMonth() !== 行事曆月份.getMonth();
     const 是今天 = 日期文字 === 日期字串();
     const 超出範圍 = 日期.getFullYear() < 1900 || 日期.getFullYear() > 9998;
-    return `<div class="calendar-cell ${非本月 ? 'outside-month' : ''} ${日期文字 === 行事曆日期 ? 'selected-date' : ''} ${是今天 ? 'is-today' : ''}"><button class="calendar-day-number weekday-${日期.getDay()}" data-calendar-date="${日期文字}" aria-label="${日期.getFullYear()}年${日期.getMonth() + 1}月${日期.getDate()}日${是今天 ? '，今天' : ''}，${當天事項.length}件待辦" aria-pressed="${日期文字 === 行事曆日期}" ${超出範圍 ? 'disabled' : ''}>${日期.getDate()}</button><div class="calendar-cell-events">${當天事項.slice(0, 3).map(行程按鈕).join('')}${當天事項.length > 3 ? `<button class="calendar-more" data-calendar-date="${日期文字}">另 ${當天事項.length - 3} 件</button>` : ''}</div></div>`;
+    return `<div class="calendar-cell ${非本月 ? 'outside-month' : ''} ${日期文字 === 行事曆日期 ? 'selected-date' : ''} ${是今天 ? 'is-today' : ''}"><button class="calendar-day-number weekday-${日期.getDay()}" data-calendar-date="${日期文字}" aria-label="${日期.getFullYear()}年${日期.getMonth() + 1}月${日期.getDate()}日${是今天 ? '，今天' : ''}，${當天事項.length}件待辦、${當天蘋果.length}件 iCloud 行程" aria-pressed="${日期文字 === 行事曆日期}" ${超出範圍 ? 'disabled' : ''}>${日期.getDate()}</button><div class="calendar-cell-events">${顯示行程.slice(0, 3).join('')}${顯示行程.length > 3 ? `<button class="calendar-more" data-calendar-date="${日期文字}">另 ${顯示行程.length - 3} 件</button>` : ''}</div></div>`;
   }).join('');
   const 本月待辦 = 顯示待辦.filter((事項) => 事項.date.startsWith(月份文字));
-  取元素('#calendar-month-summary').textContent = `本月 ${本月待辦.length} 件 · ${本月待辦.filter((事項) => !事項.done).length} 件待完成`;
+  const 本月蘋果筆數 = new Set([...蘋果分組].filter(([日期]) => 日期.startsWith(月份文字)).flatMap(([, 行程]) => 行程.map((項目) => 項目.id))).size;
+  取元素('#calendar-month-summary').textContent = `本月 ${本月待辦.length} 件待辦 · ${本月待辦.filter((事項) => !事項.done).length} 件待完成 · ${本月蘋果筆數} 件 iCloud 行程`;
   const 選取日期 = new Date(`${行事曆日期}T12:00:00`);
   取元素('#calendar-selected-label').textContent = 選取日期.toLocaleDateString('zh-TW', { month: 'long', day: 'numeric', weekday: 'long' });
   const 當天事項 = 日期分組.get(行事曆日期) || [];
-  取元素('#calendar-agenda-list').innerHTML = 當天事項.length ? 當天事項.map((事項) => `<div class="calendar-agenda-row">${行程按鈕(事項)}<span class="calendar-agenda-category">${安全文字(事項.category)} · ${事項.done ? '已完成' : '待完成'}</span><button class="calendar-button" data-calendar="${事項.id}">加入行事曆</button></div>`).join('') : '<p class="calendar-no-events">這天還沒有安排，留點時間給自己，也可以新增一件待辦。</p>';
+  const 當天蘋果 = 蘋果分組.get(行事曆日期) || [];
+  const 待辦內容 = 當天事項.map((事項) => `<div class="calendar-agenda-row">${行程按鈕(事項)}<span class="calendar-agenda-category">${安全文字(事項.category)} · ${事項.done ? '已完成' : '待完成'}</span><button class="calendar-button" data-calendar="${事項.id}">加入行事曆</button></div>`).join('');
+  const 蘋果內容 = 當天蘋果.map((行程) => `<div class="calendar-agenda-row">${iCloud行程標籤(行程)}<span class="calendar-agenda-category">iCloud · 請在 Apple 行事曆編輯${行程.location ? ` · ${安全文字(行程.location)}` : ''}</span></div>`).join('');
+  取元素('#calendar-agenda-list').innerHTML = 待辦內容 + 蘋果內容 || '<p class="calendar-no-events">這天還沒有安排，留點時間給自己，也可以新增一件待辦。</p>';
 }
 
 function 選取行事曆日期(日期) {
@@ -314,6 +335,7 @@ function 選取行事曆日期(日期) {
   行事曆日期 = 日期;
   行事曆月份 = new Date(選取日期.getFullYear(), 選取日期.getMonth(), 1);
   更新行事曆();
+  if (iCloud已連線 && iCloud載入月份 !== 日期字串(行事曆月份).slice(0, 7)) 更新iCloud行程();
 }
 
 function 移動行事曆月份(方向) {
@@ -351,6 +373,7 @@ function 顯示頁面(頁面) {
   取元素('#view-finance').hidden = 目前頁面 === '記帳';
   history.replaceState(null, '', `#${目前頁面}`);
   更新畫面();
+  if (iCloud已連線 && !取元素('#calendar-panel').hidden && (iCloud載入月份 !== 日期字串(行事曆月份).slice(0, 7) || Date.now() - iCloud最後請求 > 5 * 60 * 1000)) 更新iCloud行程();
 }
 
 function 開啟表單(類型, 識別碼 = null, 預設日期 = 日期字串()) {
@@ -630,6 +653,171 @@ async function 儲存問卷回覆(功能, 感受, 使用頻率, 使用情境, �
   取元素('#survey-error').textContent = '';
   取元素('#survey-form input').focus();
 });
+
+function 設定iCloud狀態(文字) {
+  取元素('#icloud-status').textContent = 文字;
+  取元素('#icloud-refresh').hidden = !iCloud已連線;
+  取元素('#icloud-disconnect').hidden = !iCloud已連線;
+  ['icloud-refresh', 'icloud-disconnect', 'icloud-discover', 'icloud-connect'].forEach((識別碼) => { 取元素(`#${識別碼}`).disabled = iCloud處理中; });
+}
+
+async function iCloud請求(操作, 內容 = {}) {
+  if (!雲端服務 || !訪客識別碼) throw new Error('請先連上你的個人雲端空間，再連接 iCloud。');
+  const { data, error } = await 雲端服務.auth.getSession();
+  if (error || !data.session) throw new Error('訪客身分尚未就緒，請先重試雲端同步。');
+  const 控制器 = new AbortController();
+  const 計時器 = setTimeout(() => 控制器.abort(), 60000);
+  try {
+    const 回應 = await fetch(`${專案網址}/functions/v1/icloud-calendar`, {
+      method: 'POST', headers: { apikey: 公開金鑰, Authorization: `Bearer ${data.session.access_token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...內容, action: 操作 }), signal: 控制器.signal
+    });
+    const 結果 = await 回應.json();
+    if (!回應.ok) throw new Error(結果.error || 'iCloud 連線暫時無法使用，請稍後重試。');
+    return 結果;
+  } catch (錯誤) {
+    if (控制器.signal.aborted) throw new Error('讀取 iCloud 超過一分鐘，請稍後重試。');
+    if (錯誤 instanceof TypeError || 錯誤 instanceof SyntaxError) throw new Error('無法連接 iCloud 服務，請確認網路後重試。');
+    throw 錯誤;
+  } finally { clearTimeout(計時器); }
+}
+
+async function 讀取iCloud連線() {
+  if (iCloud處理中) return;
+  const 本次訪客 = 訪客識別碼;
+  try {
+    const 結果 = await iCloud請求('status');
+    if (本次訪客 !== 訪客識別碼) return;
+    iCloud已連線 = 結果.connected;
+    if (iCloud已連線) await 更新iCloud行程();
+    else { iCloud行程 = []; 更新行事曆(); 設定iCloud狀態('尚未連接 iCloud 行事曆。'); }
+  } catch (錯誤) { if (本次訪客 === 訪客識別碼) 設定iCloud狀態(錯誤.message); }
+}
+
+async function 更新iCloud行程() {
+  if (!iCloud已連線 || iCloud處理中) return;
+  clearTimeout(iCloud重試計時器);
+  const 月份 = 日期字串(行事曆月份).slice(0, 7);
+  const 本次訪客 = 訪客識別碼;
+  if (iCloud載入月份 !== 月份) {
+    iCloud行程 = [];
+    更新行事曆();
+  }
+  const 等待時間 = 8500 - (Date.now() - iCloud最後請求);
+  if (等待時間 > 0) {
+    設定iCloud狀態('正在切換日曆資料，請稍候…');
+    iCloud重試計時器 = setTimeout(更新iCloud行程, 等待時間);
+    return;
+  }
+  iCloud處理中 = true;
+  iCloud最後請求 = Date.now();
+  設定iCloud狀態('正在讀取 iCloud 行程…');
+  try {
+    const 結果 = await iCloud請求('sync', { month: 月份 });
+    if (本次訪客 !== 訪客識別碼) return;
+    iCloud已連線 = 結果.connected;
+    if (!iCloud已連線) { iCloud行程 = []; 設定iCloud狀態('尚未連接 iCloud 行事曆。'); return; }
+    if (月份 !== 日期字串(行事曆月份).slice(0, 7)) return;
+    iCloud行程 = 結果.events;
+    iCloud載入月份 = 月份;
+    const 時間 = new Date(結果.syncedAt).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+    設定iCloud狀態(`已更新「${結果.calendarName}」· ${時間}；網站開啟時每五分鐘檢查更新`);
+  } catch (錯誤) { if (本次訪客 === 訪客識別碼) 設定iCloud狀態(`更新未完成：${錯誤.message}`); }
+  finally {
+    iCloud處理中 = false;
+    設定iCloud狀態(取元素('#icloud-status').textContent);
+    更新行事曆();
+    // 等待期間切換月份時，捨棄舊月份的回應，再讀取目前月份。
+    if (iCloud已連線 && 月份 !== 日期字串(行事曆月份).slice(0, 7)) iCloud重試計時器 = setTimeout(更新iCloud行程, 8500);
+  }
+}
+
+取元素('#icloud-form').addEventListener('submit', async (事件) => {
+  事件.preventDefault();
+  if (iCloud處理中) return;
+  iCloud處理中 = true;
+  取元素('#icloud-calendar-choice').hidden = true;
+  設定iCloud狀態('正在向 iCloud 讀取可同步的日曆…');
+  try {
+    const 結果 = await iCloud請求('discover', { username: 取元素('#icloud-email').value.trim(), password: 取元素('#icloud-password').value.trim() });
+    const 選單 = 取元素('#icloud-calendar-select');
+    選單.replaceChildren();
+    結果.calendars.forEach((日曆) => {
+      const 選項 = document.createElement('option');
+      選項.value = 日曆.url;
+      選項.textContent = 日曆.name;
+      選單.append(選項);
+    });
+    取元素('#icloud-calendar-choice').hidden = false;
+    設定iCloud狀態('請選擇要同步的日曆，再儲存連線。');
+  } catch (錯誤) { 設定iCloud狀態(錯誤.message); }
+  finally { iCloud處理中 = false; 設定iCloud狀態(取元素('#icloud-status').textContent); }
+});
+
+取元素('#icloud-connect').addEventListener('click', async () => {
+  if (iCloud處理中 || !取元素('#icloud-form').reportValidity()) return;
+  iCloud處理中 = true;
+  設定iCloud狀態('正在儲存加密連線設定…');
+  try {
+    await iCloud請求('connect', { username: 取元素('#icloud-email').value.trim(), password: 取元素('#icloud-password').value.trim(), calendarUrl: 取元素('#icloud-calendar-select').value });
+    iCloud已連線 = true;
+    取元素('#icloud-form').reset();
+    取元素('#icloud-calendar-select').replaceChildren();
+    取元素('#icloud-calendar-choice').hidden = true;
+    取元素('#icloud-settings').open = false;
+    iCloud行程 = [];
+    iCloud載入月份 = '';
+    clearTimeout(iCloud重試計時器);
+  } catch (錯誤) { 設定iCloud狀態(錯誤.message); }
+  finally { iCloud處理中 = false; 設定iCloud狀態(取元素('#icloud-status').textContent); }
+  if (iCloud已連線) await 更新iCloud行程();
+});
+
+取元素('#icloud-disconnect').addEventListener('click', async () => {
+  if (iCloud處理中) return;
+  iCloud處理中 = true;
+  設定iCloud狀態('正在中斷 iCloud 連線…');
+  try {
+    await iCloud請求('disconnect');
+    iCloud已連線 = false;
+    iCloud行程 = [];
+    iCloud載入月份 = '';
+    取元素('#icloud-form').reset();
+    取元素('#icloud-calendar-select').replaceChildren();
+    取元素('#icloud-calendar-choice').hidden = true;
+    設定iCloud狀態('已中斷連線並移除後端憑證。你也可以到 Apple 帳號撤銷 App 專用密碼。');
+    更新行事曆();
+  } catch (錯誤) { 設定iCloud狀態(錯誤.message); }
+  finally { iCloud處理中 = false; 設定iCloud狀態(取元素('#icloud-status').textContent); }
+});
+
+['icloud-email', 'icloud-password'].forEach((識別碼) => 取元素(`#${識別碼}`).addEventListener('input', () => { 取元素('#icloud-calendar-choice').hidden = true; }));
+取元素('#icloud-refresh').addEventListener('click', 更新iCloud行程);
+setInterval(() => { if (document.visibilityState === 'visible' && !取元素('#calendar-panel').hidden) 更新iCloud行程(); }, 5 * 60 * 1000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !取元素('#calendar-panel').hidden && Date.now() - iCloud最後請求 > 10000) 更新iCloud行程(); });
+
+// 只將行程放進它涵蓋的日期；全天行程的結束日期不包含當天。
+function iCloud日期分組() {
+  const 分組 = new Map();
+  if (!['全部', 'iCloud'].includes(行事曆分類)) return 分組;
+  取得月曆日期(行事曆月份).forEach((日期) => {
+    const 日期文字 = 日期字串(日期);
+    const 起點 = new Date(`${日期文字}T00:00:00`);
+    const 終點 = new Date(起點); 終點.setDate(終點.getDate() + 1);
+    const 行程 = iCloud行程.filter((項目) => {
+      if (項目.allDay) return 日期文字 >= 項目.start && 日期文字 < 項目.end;
+      const 開始 = new Date(項目.start); const 結束 = new Date(項目.end);
+      return 開始 < 終點 && (結束 > 起點 || (開始.getTime() === 結束.getTime() && 開始 >= 起點));
+    });
+    分組.set(日期文字, 行程);
+  });
+  return 分組;
+}
+
+function iCloud行程標籤(行程) {
+  const 時間 = 行程.allDay ? '全天' : new Date(行程.start).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+  return `<span class="calendar-event icloud-event" title="${安全文字(行程.title)}">☁ ${時間} ${安全文字(行程.title)}</span>`;
+}
 
 // 使用網址片段切換頁面，直接開啟根目錄的網頁檔案也能使用。
 function 讀取頁面() {
