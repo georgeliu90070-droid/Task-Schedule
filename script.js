@@ -1,14 +1,34 @@
 const 取元素 = (選擇器) => document.querySelector(選擇器);
 const 全部元素 = (選擇器) => document.querySelectorAll(選擇器);
-// 沿用原本的儲存鍵，改名後仍可讀取既有紀錄。
+// 本機保留快取，雲端則依自動建立的訪客身分分開保存。
 const 儲存鍵 = '日子生活管理資料';
+let 本機儲存鍵 = 儲存鍵;
+let 訪客識別碼 = null;
+let 雲端服務 = null;
+let 雲端就緒 = false;
+let 啟動中 = false;
+let 同步中 = false;
+const 待同步 = { tasks: new Set(), transactions: new Set(), notes: new Set(), expenseCategories: new Set() };
+let 上次本機資料 = { tasks: [], transactions: [], notes: [], expenseCategories: [] };
+let 問卷處理中 = false;
+let 待送問卷 = null;
+// 只填入專案網址與可公開金鑰，絕對不可填入服務角色或秘密金鑰。
+const 專案網址 = 'https://iynajzpflrmkcciebtam.supabase.co';
+const 公開金鑰 = 'sb_publishable__16ssp4F-NNdqQKyxkfZ4g_PqTNANQk';
+// 左邊沿用畫面既有欄位，右邊對應資料庫的繁體中文欄位。
+const 雲端資料表 = {
+  tasks: { 名稱: '待辦事項', 欄位: { id: '識別碼', title: '名稱', date: '日期', category: '分類', priority: '優先程度', done: '已完成' } },
+  transactions: { 名稱: '收支紀錄', 欄位: { id: '識別碼', title: '名稱', date: '日期', type: '類型', amount: '金額', category: '分類' } },
+  notes: { 名稱: '隨手筆記', 欄位: { id: '識別碼', title: '名稱', content: '內容', updated: '更新時間' } },
+  expenseCategories: { 名稱: '支出分類' }
+};
 const 今天 = new Date();
 const 日期字串 = (日期 = new Date()) => `${日期.getFullYear()}-${String(日期.getMonth() + 1).padStart(2, '0')}-${String(日期.getDate()).padStart(2, '0')}`;
 const 金額文字 = (金額) => `${金額 < 0 ? '−' : ''}$${Math.abs(金額).toLocaleString('zh-TW', { maximumFractionDigits: 2 })}`;
 // 使用文字節點處理使用者內容，避免筆記被當成網頁程式執行。
 const 安全文字 = (文字) => { const 容器 = document.createElement('span'); 容器.textContent = 文字; return 容器.innerHTML; };
 const 新識別碼 = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-let 資料 = { tasks: [], transactions: [], notes: [] };
+let 資料 = { tasks: [], transactions: [], notes: [], expenseCategories: [] };
 let 目前頁面 = '總覽';
 let 待辦篩選 = 'pending';
 let 選擇月份 = new Date(今天.getFullYear(), 今天.getMonth(), 1);
@@ -27,6 +47,26 @@ const 分類資料 = {
   '其他': { color: '#d9dde3', icon: '⋯' }
 };
 
+// 自訂分類只儲存名稱，圖表顏色統一由程式分配。
+function 取得支出分類(自訂分類 = 資料.expenseCategories) {
+  return [...new Set([...Object.keys(分類資料), ...自訂分類])];
+}
+
+function 取得分類樣式() {
+  const 色票 = ['#ed703e', '#15243c', '#61718a', '#f3ba9e', '#909aa9', '#b64f27'];
+  return { ...分類資料, ...Object.fromEntries(資料.expenseCategories.map((名稱, 位置) => [名稱, { color: 色票[位置 % 色票.length], icon: '◇' }])) };
+}
+
+function 新增支出分類(名稱) {
+  名稱 = 名稱.trim();
+  if (!名稱 || 名稱.length > 20 || /[\u0000-\u001f\u007f]/.test(名稱)) throw new Error('請輸入一至二十字的分類名稱。');
+  if (取得支出分類().includes(名稱)) throw new Error('這個分類已經存在，請直接從分類選單選取。');
+  if (資料.expenseCategories.length >= 100) throw new Error('自訂分類已達一百種，請使用現有分類。');
+  資料.expenseCategories.push(名稱);
+  儲存();
+  return 名稱;
+}
+
 function 提示(訊息) {
   clearTimeout(提示計時);
   取元素('#toast').textContent = 訊息;
@@ -34,10 +74,146 @@ function 提示(訊息) {
   提示計時 = setTimeout(() => 取元素('#toast').classList.remove('visible'), 3200);
 }
 
+function 設定同步狀態(文字, 可重試 = false) {
+  取元素('#sync-message').textContent = 文字;
+  取元素('#sync-retry').hidden = !可重試;
+  全部元素('[data-sync-label]').forEach((元素) => { 元素.textContent = 文字; });
+}
+
+function 保存本機快取() {
+  try {
+    const 佇列 = Object.fromEntries(Object.entries(待同步).map(([鍵, 清單]) => [鍵, [...清單]]));
+    localStorage.setItem(本機儲存鍵, JSON.stringify({ ...資料, 待同步: 佇列 }));
+  } catch { 提示('瀏覽器無法儲存備份，請先匯出以保留紀錄。'); }
+  上次本機資料 = JSON.parse(JSON.stringify(資料));
+}
+
 function 儲存() {
-  try { localStorage.setItem(儲存鍵, JSON.stringify(資料)); }
-  catch { 提示('瀏覽器無法儲存，請先匯出備份以保留紀錄。'); }
+  // 只標記新增或修改的紀錄，避免把未修改的舊資料覆蓋到雲端。
+  Object.keys(待同步).forEach((鍵) => {
+    const 舊紀錄 = new Map(上次本機資料[鍵].map((項目) => [鍵 === 'expenseCategories' ? 項目 : 項目.id, JSON.stringify(項目)]));
+    資料[鍵].forEach((項目) => {
+      const 識別碼 = 鍵 === 'expenseCategories' ? 項目 : 項目.id;
+      if (舊紀錄.get(識別碼) !== JSON.stringify(項目)) 待同步[鍵].add(識別碼);
+    });
+  });
+  保存本機快取();
   更新畫面();
+  if (雲端就緒) 同步生活資料();
+  else 設定同步狀態('已保存在本機，等待雲端連線', true);
+}
+
+function 轉換雲端紀錄(鍵, 紀錄) {
+  if (鍵 === 'expenseCategories') return { 使用者識別碼: 訪客識別碼, 名稱: 紀錄 };
+  return { 使用者識別碼: 訪客識別碼, ...Object.fromEntries(Object.entries(雲端資料表[鍵].欄位).map(([本機欄位, 雲端欄位]) => [雲端欄位, 本機欄位 === 'date' && !紀錄[本機欄位] ? null : 紀錄[本機欄位]])) };
+}
+
+async function 讀取雲端清單(鍵) {
+  const 結果 = [];
+  // 分頁讀取，避免超過伺服器單次筆數上限後漏掉舊紀錄。
+  for (let 起點 = 0; ; 起點 += 500) {
+    const 排序欄位 = 鍵 === 'expenseCategories' ? '名稱' : '識別碼';
+    const { data, error } = await 雲端服務.from(雲端資料表[鍵].名稱).select('*').eq('使用者識別碼', 訪客識別碼).order(排序欄位).range(起點, 起點 + 499);
+    if (error) throw error;
+    結果.push(...data);
+    if (data.length < 500) break;
+  }
+  return 結果.map((紀錄) => 鍵 === 'expenseCategories' ? 紀錄.名稱 : Object.fromEntries(Object.entries(雲端資料表[鍵].欄位).map(([本機欄位, 雲端欄位]) => [本機欄位, 紀錄[雲端欄位] ?? ''])));
+}
+
+function 雲端錯誤文字(錯誤) {
+  if (錯誤?.code === 'anonymous_provider_disabled') return '已保存在本機；專案尚未啟用訪客雲端功能';
+  if (錯誤?.code === '42501') return '已保存在本機；雲端權限不足，請聯絡網站管理者';
+  return '已保存在本機，雲端同步未完成，請檢查網路後重試';
+}
+
+async function 同步生活資料() {
+  if (!雲端就緒 || 同步中) return;
+  同步中 = true;
+  設定同步狀態('正在同步至雲端…');
+  try {
+    while (Object.values(待同步).some((清單) => 清單.size)) {
+      for (const 鍵 of Object.keys(待同步)) {
+        const 批次 = 資料[鍵].filter((項目) => 待同步[鍵].has(鍵 === 'expenseCategories' ? 項目 : 項目.id)).map((項目) => JSON.parse(JSON.stringify(項目)));
+        if (!批次.length) continue;
+        // 分批送出；識別碼相同就更新，斷線重試不會重複新增。
+        for (let 起點 = 0; 起點 < 批次.length; 起點 += 200) {
+          const 本批 = 批次.slice(起點, 起點 + 200);
+          const 衝突欄位 = 鍵 === 'expenseCategories' ? '使用者識別碼,名稱' : '使用者識別碼,識別碼';
+          const { error } = await 雲端服務.from(雲端資料表[鍵].名稱).upsert(本批.map((項目) => 轉換雲端紀錄(鍵, 項目)), { onConflict: 衝突欄位 });
+          if (error) throw error;
+          本批.forEach((項目) => {
+            const 識別碼 = 鍵 === 'expenseCategories' ? 項目 : 項目.id;
+            const 最新紀錄 = 資料[鍵].find((目前) => (鍵 === 'expenseCategories' ? 目前 : 目前.id) === 識別碼);
+            // 等待期間若又被修改，保留在佇列中，下一輪再送出最新內容。
+            if (JSON.stringify(最新紀錄) === JSON.stringify(項目)) 待同步[鍵].delete(識別碼);
+          });
+          保存本機快取();
+        }
+      }
+    }
+    設定同步狀態('已同步至雲端');
+  } catch (錯誤) { 設定同步狀態(雲端錯誤文字(錯誤), true); }
+  finally { 同步中 = false; }
+}
+
+// 所有雲端請求設有十五秒上限，斷線時仍能繼續使用本機紀錄。
+async function 有逾時的請求(網址, 設定 = {}) {
+  const 控制器 = new AbortController();
+  const 中止 = () => 控制器.abort();
+  const 計時器 = setTimeout(中止, 15000);
+  if (設定.signal?.aborted) 中止();
+  設定.signal?.addEventListener('abort', 中止);
+  try { return await fetch(網址, { ...設定, signal: 控制器.signal }); }
+  finally { clearTimeout(計時器); 設定.signal?.removeEventListener('abort', 中止); }
+}
+
+async function 啟動雲端() {
+  if (啟動中 || 同步中) return;
+  if (雲端就緒) { await 同步生活資料(); return; }
+  啟動中 = true;
+  設定同步狀態('正在連接個人雲端空間…');
+  try {
+    if (!window.supabase) throw new Error('雲端程式尚未載入');
+    if (!雲端服務) 雲端服務 = window.supabase.createClient(專案網址, 公開金鑰, {
+      auth: { storageKey: '日常訪客身分', persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
+      global: { fetch: 有逾時的請求 }
+    });
+    const { data: 身分資料, error: 身分錯誤 } = await 雲端服務.auth.getSession();
+    if (身分錯誤) throw 身分錯誤;
+    let 身分 = 身分資料.session;
+    if (!身分) {
+      const { data, error } = await 雲端服務.auth.signInAnonymously();
+      if (error) throw error;
+      身分 = data.session;
+    }
+    if (!身分?.user?.is_anonymous) throw new Error('無法取得訪客身分');
+    const 上次訪客 = localStorage.getItem('日常上次訪客');
+    訪客識別碼 = 身分.user.id;
+    本機儲存鍵 = `${儲存鍵}-${訪客識別碼}`;
+    // 新訪客不會自動取得上一個訪客的快取；初次使用才轉入原本本機資料。
+    if (上次訪客 && 上次訪客 !== 訪客識別碼) 讀取本機資料(本機儲存鍵);
+    保存本機快取();
+    localStorage.setItem('日常上次訪客', 訪客識別碼);
+    const 鍵清單 = Object.keys(雲端資料表);
+    const 雲端清單 = await Promise.all(鍵清單.map(讀取雲端清單));
+    const 合併資料 = {};
+    鍵清單.forEach((鍵, 位置) => {
+      const 雲端紀錄 = new Map(雲端清單[位置].map((項目) => [鍵 === 'expenseCategories' ? 項目 : 項目.id, 項目]));
+      資料[鍵].forEach((項目) => {
+        const 識別碼 = 鍵 === 'expenseCategories' ? 項目 : 項目.id;
+        if (待同步[鍵].has(識別碼)) 雲端紀錄.set(識別碼, 項目);
+      });
+      合併資料[鍵] = [...雲端紀錄.values()];
+    });
+    if (!檢查資料(合併資料)) throw new Error('雲端資料格式不符');
+    資料 = 合併資料;
+    保存本機快取();
+    更新畫面();
+    雲端就緒 = true;
+    await 同步生活資料();
+  } catch (錯誤) { 設定同步狀態(雲端錯誤文字(錯誤), true); }
+  finally { 啟動中 = false; }
 }
 
 function 空白提示(圖示, 文字, 類型, 按鈕) {
@@ -78,7 +254,7 @@ function 更新記帳() {
   取元素('#balance-summary').textContent = 收入 - 支出 < 0 ? '本月支出較多，花點時間整理一下' : '收入減去支出，心中更有數';
   取元素('#finance-month').textContent = `${選擇月份.getFullYear()} 年 ${選擇月份.getMonth() + 1} 月`;
   const 紀錄清單 = 月份紀錄(選擇月份).sort((甲, 乙) => 乙.date.localeCompare(甲.date) || 乙.id.localeCompare(甲.id));
-  const 各類支出 = Object.entries(分類資料).map(([分類, 樣式]) => ({ 分類, ...樣式, 金額: 紀錄清單.filter((紀錄) => 紀錄.type === 'expense' && 紀錄.category === 分類).reduce((合計, 紀錄) => 合計 + 紀錄.amount, 0) }));
+  const 各類支出 = Object.entries(取得分類樣式()).map(([分類, 樣式]) => ({ 分類, ...樣式, 金額: 紀錄清單.filter((紀錄) => 紀錄.type === 'expense' && 紀錄.category === 分類).reduce((合計, 紀錄) => 合計 + 紀錄.amount, 0) }));
   const 總支出 = 各類支出.reduce((合計, 分類) => 合計 + 分類.金額, 0);
   取元素('#donut-total').textContent = 金額文字(總支出);
   let 累積角度 = 0;
@@ -88,9 +264,9 @@ function 更新記帳() {
     return `${分類.color} ${起點}deg ${累積角度}deg`;
   });
   取元素('#donut').style.background = 色段.length ? `conic-gradient(${色段.join(',')})` : '#eceef1';
-  取元素('#category-legend').innerHTML = 各類支出.filter((分類) => 分類.金額 > 0).map((分類) => `<div class="legend-row"><i style="background:${分類.color}"></i><span>${分類.分類}</span><strong>${金額文字(分類.金額)}</strong></div>`).join('') || '<span class="muted">還沒有支出紀錄<br><br>從今天開始記一筆吧</span>';
+  取元素('#category-legend').innerHTML = 各類支出.filter((分類) => 分類.金額 > 0).map((分類) => `<div class="legend-row"><i style="background:${分類.color}"></i><span>${安全文字(分類.分類)}</span><strong>${金額文字(分類.金額)}</strong></div>`).join('') || '<span class="muted">還沒有支出紀錄<br><br>從今天開始記一筆吧</span>';
   const 顯示清單 = 目前頁面 === '記帳' ? 紀錄清單 : 紀錄清單.slice(0, 3);
-  取元素('#transaction-list').innerHTML = 顯示清單.length ? 顯示清單.map((紀錄) => `<div class="transaction-row"><span class="transaction-icon">${紀錄.type === 'income' ? '↙' : 分類資料[紀錄.category]?.icon || '⋯'}</span><div class="transaction-copy"><div class="transaction-title">${安全文字(紀錄.title)}</div><div class="transaction-meta">${安全文字(紀錄.category)} · ${紀錄.date.slice(5).replace('-', ' / ')}</div></div><span class="transaction-amount ${紀錄.type === 'income' ? 'income' : ''}">${紀錄.type === 'income' ? '＋' : '−'}${金額文字(紀錄.amount)}</span><button class="edit-button" data-edit="transaction" data-id="${紀錄.id}" aria-label="編輯收支紀錄">⋯</button></div>`).join('') : 空白提示('▤', '小小一筆，讓收支更清楚。', 'transaction', '記下第一筆收支');
+  取元素('#transaction-list').innerHTML = 顯示清單.length ? 顯示清單.map((紀錄) => `<div class="transaction-row"><span class="transaction-icon">${紀錄.type === 'income' ? '↙' : 取得分類樣式()[紀錄.category]?.icon || '⋯'}</span><div class="transaction-copy"><div class="transaction-title">${安全文字(紀錄.title)}</div><div class="transaction-meta">${安全文字(紀錄.category)} · ${紀錄.date.slice(5).replace('-', ' / ')}</div></div><span class="transaction-amount ${紀錄.type === 'income' ? 'income' : ''}">${紀錄.type === 'income' ? '＋' : '−'}${金額文字(紀錄.amount)}</span><button class="edit-button" data-edit="transaction" data-id="${紀錄.id}" aria-label="編輯收支紀錄">⋯</button></div>`).join('') : 空白提示('▤', '小小一筆，讓收支更清楚。', 'transaction', '記下第一筆收支');
 }
 
 function 更新筆記() {
@@ -156,14 +332,17 @@ function 移動行事曆月份(方向) {
 
 function 更新畫面() { 更新待辦(); 更新記帳(); 更新筆記(); 更新行事曆(); }
 
-function 切換頁面(頁面) {
-  目前頁面 = ['總覽', '待辦', '行事曆', '記帳', '筆記'].includes(頁面) ? 頁面 : '總覽';
-  const 頁面資料 = { 行事曆: ['行事曆', '每一天，都有自己的節奏', '用月曆整理日常安排，替重要的事留好位置。'], 總覽: ['生活總覽', '把今天，過成喜歡的樣子', '整理待辦、記下收支，也留一點空間給自己。'], 待辦: ['待辦事項', '一步一步，把小事完成', '把重要的事記下來，讓腦袋輕鬆一點。'], 記帳: ['收支記帳', '每一筆，都是生活的足跡', '金額以新臺幣記錄，慢慢養成記帳的小習慣。'], 筆記: ['隨手筆記', '把靈感，留在這裡', '想法、心情與生活中的小發現，都值得被記下。'] }[目前頁面];
+function 顯示頁面(頁面) {
+  目前頁面 = ['總覽', '待辦', '行事曆', '記帳', '筆記', '問卷'].includes(頁面) ? 頁面 : '總覽';
+  const 頁面資料 = { 問卷: ['回饋問卷', '你的想法，讓日常更好', '簡單兩題，分享你對日常的使用感受。'], 行事曆: ['行事曆', '每一天，都有自己的節奏', '用月曆整理日常安排，替重要的事留好位置。'], 總覽: ['生活總覽', '把今天，過成喜歡的樣子', '整理待辦、記下收支，也留一點空間給自己。'], 待辦: ['待辦事項', '一步一步，把小事完成', '把重要的事記下來，讓腦袋輕鬆一點。'], 記帳: ['收支記帳', '每一筆，都是生活的足跡', '金額以新臺幣記錄，慢慢養成記帳的小習慣。'], 筆記: ['隨手筆記', '把靈感，留在這裡', '想法、心情與生活中的小發現，都值得被記下。'] }[目前頁面];
   取元素('#breadcrumb').textContent = 頁面資料[0];
   取元素('#page-title').innerHTML = `${頁面資料[1]} <span>${目前頁面 === '筆記' ? '✧' : '☀'}</span>`;
   取元素('#page-description').textContent = 頁面資料[2];
   全部元素('[data-page]').forEach((按鈕) => { 按鈕.classList.toggle('active', 按鈕.dataset.page === 目前頁面); if (按鈕.dataset.page === 目前頁面) 按鈕.setAttribute('aria-current', 'page'); else 按鈕.removeAttribute('aria-current'); });
   取元素('#dashboard').hidden = 目前頁面 !== '總覽';
+  取元素('#survey-panel').hidden = 目前頁面 !== '問卷';
+  取元素('#main-grid').hidden = 目前頁面 === '問卷';
+  取元素('#quick-add').hidden = 目前頁面 === '問卷';
   取元素('#tasks-panel').hidden = !['總覽', '待辦'].includes(目前頁面);
   取元素('#calendar-panel').hidden = !['總覽', '待辦', '行事曆'].includes(目前頁面);
   取元素('#finance-panel').hidden = !['總覽', '記帳'].includes(目前頁面);
@@ -181,12 +360,13 @@ function 開啟表單(類型, 識別碼 = null, 預設日期 = 日期字串()) {
   const 原資料 = 集合.find((紀錄) => 紀錄.id === 識別碼);
   取元素('#dialog-title').textContent = `${原資料 ? '編輯' : '新增'}${類型 === 'task' ? '待辦' : 類型 === 'transaction' ? '收支紀錄' : '筆記'}`;
   const 欄位 = (標籤, 內容) => `<label class="form-field">${標籤}${內容}</label>`;
-  const 選單 = (名稱, 選項) => `<select name="${名稱}">${選項.map(([值, 文字]) => `<option value="${值}">${文字}</option>`).join('')}</select>`;
+  const 選單 = (名稱, 選項) => `<select name="${名稱}">${選項.map(([值, 文字]) => `<option value="${安全文字(值)}">${安全文字(文字)}</option>`).join('')}</select>`;
   let 欄位內容 = 欄位('名稱', '<input name="title" required maxlength="100" placeholder="寫下想記錄的事…">');
   if (類型 === 'task') {
     欄位內容 += 欄位('預定日期（可留白）', '<input type="date" name="date" min="1900-01-01" max="9999-12-31">') + '<div class="form-row">' + 欄位('分類', 選單('category', ['生活', '工作', '個人', '學習'].map((名稱) => [名稱, 名稱]))) + 欄位('優先程度', 選單('priority', [['一般', '一般'], ['優先', '優先處理']])) + '</div>';
   } else if (類型 === 'transaction') {
-    欄位內容 += '<div class="form-row">' + 欄位('收支類型', 選單('type', [['expense', '支出'], ['income', '收入']])) + 欄位('金額（新臺幣）', '<input name="amount" type="number" min="0.01" max="999999999" step="0.01" required placeholder="0">') + '</div>' + 欄位('日期', '<input type="date" name="date" required min="1900-01-01" max="9999-12-31">') + 欄位('分類', 選單('category', Object.keys(分類資料).map((名稱) => [名稱, 名稱])));
+    欄位內容 += '<div class="form-row">' + 欄位('收支類型', 選單('type', [['expense', '支出'], ['income', '收入']])) + 欄位('金額（新臺幣）', '<input name="amount" type="number" min="0.01" max="999999999" step="0.01" required placeholder="0">') + '</div>' + 欄位('日期', '<input type="date" name="date" required min="1900-01-01" max="9999-12-31">') + 欄位('分類', 選單('category', 取得支出分類().map((名稱) => [名稱, 名稱])));
+    欄位內容 += '<div id="custom-category-fields" class="custom-category-fields"><label for="custom-category-name">新增支出分類</label><div class="custom-category-row"><input id="custom-category-name" maxlength="20" placeholder="例如：醫療、寵物、旅遊"><button type="button" id="add-expense-category">＋ 新增</button></div><small>新增後會自動選取，之後記帳也能使用。</small></div>';
   } else {
     欄位內容 += 欄位('想記下的內容', '<textarea name="content" required maxlength="5000" placeholder="今天有什麼小小的發現呢？"></textarea>');
   }
@@ -195,8 +375,25 @@ function 開啟表單(類型, 識別碼 = null, 預設日期 = 日期字串()) {
   const 表單 = 取元素('#entry-form');
   if (類型 === 'transaction') {
     const 更新分類選單 = () => {
-      表單.elements.category.innerHTML = (表單.elements.type.value === 'income' ? ['薪資', '獎金', '其他'] : Object.keys(分類資料)).map((名稱) => `<option value="${名稱}">${名稱}</option>`).join('');
+      const 原分類 = 表單.elements.category.value;
+      const 選項 = 表單.elements.type.value === 'income' ? ['薪資', '獎金', '其他'] : 取得支出分類();
+      表單.elements.category.innerHTML = 選項.map((名稱) => `<option value="${安全文字(名稱)}">${安全文字(名稱)}</option>`).join('');
+      if (選項.includes(原分類)) 表單.elements.category.value = 原分類;
+      取元素('#custom-category-fields').hidden = 表單.elements.type.value === 'income';
     };
+    取元素('#add-expense-category').addEventListener('click', () => {
+      try {
+        const 名稱 = 新增支出分類(取元素('#custom-category-name').value);
+        更新分類選單();
+        表單.elements.category.value = 名稱;
+        取元素('#custom-category-name').value = '';
+        取元素('#form-error').textContent = '';
+        提示(`已新增「${名稱}」分類。`);
+      } catch (錯誤) { 取元素('#form-error').textContent = 錯誤.message; }
+    });
+    取元素('#custom-category-name').addEventListener('keydown', (事件) => {
+      if (事件.key === 'Enter' && !事件.isComposing) { 事件.preventDefault(); 取元素('#add-expense-category').click(); }
+    });
     表單.elements.type.addEventListener('change', 更新分類選單);
     if (原資料) 表單.elements.type.value = 原資料.type;
     更新分類選單();
@@ -253,7 +450,7 @@ document.addEventListener('click', (事件) => {
 取元素('#view-finance').addEventListener('click', () => 切換頁面('記帳'));
 取元素('#previous-month').addEventListener('click', () => { 選擇月份.setMonth(選擇月份.getMonth() - 1); 更新記帳(); });
 取元素('#next-month').addEventListener('click', () => { 選擇月份.setMonth(選擇月份.getMonth() + 1); 更新記帳(); });
-window.addEventListener('hashchange', () => 切換頁面(decodeURIComponent(location.hash.slice(1))));
+window.addEventListener('hashchange', () => 切換頁面(讀取頁面()));
 
 // 行事曆文字需跳脫特殊符號，避免換行或逗號破壞檔案內容。
 function 行事曆文字(文字) {
@@ -323,8 +520,11 @@ function 檢查資料(輸入) {
   const 是文字 = (值, 上限) => typeof 值 === 'string' && 值.length <= 上限;
   const 是日期 = (值) => 是文字(值, 10) && /^\d{4}-\d{2}-\d{2}$/.test(值) && !Number.isNaN(Date.parse(值));
   if (!輸入 || !['tasks', 'transactions', 'notes'].every((鍵) => Array.isArray(輸入[鍵]) && 輸入[鍵].length <= 10000)) return false;
+  // 舊備份沒有自訂分類欄位時，以空清單相容讀取。
+  const 自訂分類 = 輸入.expenseCategories === undefined ? [] : 輸入.expenseCategories;
+  if (!Array.isArray(自訂分類) || 自訂分類.length > 100 || !自訂分類.every((名稱) => 是文字(名稱, 20) && 名稱.trim() === 名稱 && 名稱.length > 0 && !/[\u0000-\u001f\u007f]/.test(名稱)) || new Set(自訂分類).size !== 自訂分類.length) return false;
   const 基本檢查 = (紀錄) => 紀錄 && 是文字(紀錄.id, 100) && /^[a-zA-Z0-9-]+$/.test(紀錄.id) && 是文字(紀錄.title, 100) && 紀錄.title.trim();
-  return 輸入.tasks.every((紀錄) => 基本檢查(紀錄) && typeof 紀錄.done === 'boolean' && (紀錄.date === '' || 是日期(紀錄.date)) && ['生活', '工作', '個人', '學習'].includes(紀錄.category) && ['一般', '優先'].includes(紀錄.priority)) && 輸入.transactions.every((紀錄) => 基本檢查(紀錄) && 是日期(紀錄.date) && ['income', 'expense'].includes(紀錄.type) && typeof 紀錄.amount === 'number' && Number.isFinite(紀錄.amount) && 紀錄.amount > 0 && 紀錄.amount <= 999999999 && (紀錄.type === 'income' ? ['薪資', '獎金', '其他'] : Object.keys(分類資料)).includes(紀錄.category)) && 輸入.notes.every((紀錄) => 基本檢查(紀錄) && 是文字(紀錄.content, 5000) && 是文字(紀錄.updated, 40) && !Number.isNaN(Date.parse(紀錄.updated)));
+  return 輸入.tasks.every((紀錄) => 基本檢查(紀錄) && typeof 紀錄.done === 'boolean' && (紀錄.date === '' || 是日期(紀錄.date)) && ['生活', '工作', '個人', '學習'].includes(紀錄.category) && ['一般', '優先'].includes(紀錄.priority)) && 輸入.transactions.every((紀錄) => 基本檢查(紀錄) && 是日期(紀錄.date) && ['income', 'expense'].includes(紀錄.type) && typeof 紀錄.amount === 'number' && Number.isFinite(紀錄.amount) && 紀錄.amount > 0 && 紀錄.amount <= 999999999 && (紀錄.type === 'income' ? ['薪資', '獎金', '其他'] : 取得支出分類(自訂分類)).includes(紀錄.category)) && 輸入.notes.every((紀錄) => 基本檢查(紀錄) && 是文字(紀錄.content, 5000) && 是文字(紀錄.updated, 40) && !Number.isNaN(Date.parse(紀錄.updated)));
 }
 
 取元素('#import').addEventListener('click', () => 取元素('#import-file').click());
@@ -335,6 +535,9 @@ function 檢查資料(輸入) {
     if (檔案.size > 5 * 1024 * 1024) throw new Error('備份過大');
     const 輸入 = JSON.parse(await 檔案.text());
     if (!檢查資料(輸入)) throw new Error('備份格式不符');
+    const 合併分類 = [...new Set([...資料.expenseCategories, ...(輸入.expenseCategories || [])])];
+    if (合併分類.length > 100) throw new Error('自訂分類超過上限');
+    資料.expenseCategories = 合併分類;
     let 新增數量 = 0;
     ['tasks', 'transactions', 'notes'].forEach((鍵) => {
       const 已有識別碼 = new Set(資料[鍵].map((紀錄) => 紀錄.id));
@@ -346,13 +549,119 @@ function 檢查資料(輸入) {
   事件.target.value = '';
 });
 
-try {
-  const 已儲存資料 = localStorage.getItem(儲存鍵);
-  if (已儲存資料) {
-    const 讀取資料 = JSON.parse(已儲存資料);
-    if (檢查資料(讀取資料)) 資料 = 讀取資料;
-    else 提示('儲存資料格式不符，請使用備份匯入。');
+// 使用較普遍支援的亂數功能，讓直接開啟本機網頁也能產生識別碼。
+function 建立問卷識別碼() {
+  const 位元組 = crypto.getRandomValues(new Uint8Array(16));
+  // 依通用識別碼格式設定版本，再將十六個位元組組合成文字。
+  位元組[6] = (位元組[6] & 15) | 64;
+  位元組[8] = (位元組[8] & 63) | 128;
+  const 文字 = Array.from(位元組, (值) => 值.toString(16).padStart(2, '0')).join('');
+  return `${文字.slice(0, 8)}-${文字.slice(8, 12)}-${文字.slice(12, 16)}-${文字.slice(16, 20)}-${文字.slice(20)}`;
+}
+
+// 公開問卷只送出答案，不建立帳號，也不讀取雲端回覆。
+async function 儲存問卷回覆(功能, 感受) {
+  if (!['待辦事項', '行事曆', '收支記帳', '隨手筆記'].includes(功能) || !['很滿意', '還不錯', '可以更好'].includes(感受)) throw new Error('請完成兩題後再送出。');
+  // 重試沿用同一份答案與識別碼，避免連線中斷後重複新增。
+  if (!待送問卷) 待送問卷 = { 識別碼: 建立問卷識別碼(), 功能, 感受 };
+  // 使用計時器處理逾時，避免依賴部分瀏覽器尚未支援的逾時方法。
+  const 控制器 = new AbortController();
+  const 逾時計時器 = setTimeout(() => 控制器.abort(), 15000);
+  try {
+    let 回應;
+    try {
+      回應 = await fetch(`${專案網址}/rest/v1/${encodeURIComponent('問卷回覆')}`, {
+        method: 'POST',
+        headers: { apikey: 公開金鑰, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify(待送問卷),
+        signal: 控制器.signal
+      });
+    } catch (錯誤) {
+      throw new Error(控制器.signal.aborted ? '連線超過十五秒，尚未確認儲存，請稍後重試。' : '無法連上問卷服務，請確認網路連線，或檢查瀏覽器是否阻擋此網站的連線。');
+    }
+    if (!回應.ok) {
+      const 錯誤 = await 回應.json().catch(() => ({}));
+      // 同一識別碼已存在，代表上次送出已成功；回傳當時送出的答案。
+      if (回應.status === 409 && 錯誤.code === '23505') return 待送問卷;
+      if ([401, 403].includes(回應.status)) throw new Error('問卷服務拒絕存取，請告知網站管理者檢查公開金鑰與問卷寫入權限。');
+      if (回應.status === 400) throw new Error('問卷資料格式不符合要求，請重新整理網頁後再填寫。');
+      throw new Error(`問卷服務暫時無法儲存（狀態碼：${回應.status}），請稍後重試。`);
+    }
+    return 待送問卷;
+  } finally {
+    clearTimeout(逾時計時器);
   }
-} catch { 提示('目前無法讀取本機資料，可使用匯出備份保留紀錄。'); }
+}
+
+取元素('#survey-form').addEventListener('submit', async (事件) => {
+  事件.preventDefault();
+  if (問卷處理中) return;
+  問卷處理中 = true;
+  const 送出按鈕 = 取元素('#survey-form button[type="submit"]');
+  送出按鈕.disabled = true;
+  送出按鈕.textContent = '正在儲存…';
+  取元素('#survey-error').textContent = '';
+  try {
+    const 輸入 = new FormData(事件.currentTarget);
+    const 回覆 = await 儲存問卷回覆(輸入.get('feature'), 輸入.get('feeling'));
+    取元素('#survey-answer-summary').textContent = `最想使用：${回覆.功能} · 整體感受：${回覆.感受}`;
+    取元素('#survey-form').hidden = true;
+    取元素('#survey-success').hidden = false;
+    取元素('#survey-success').focus();
+  } catch (錯誤) {
+    取元素('#survey-error').textContent = /[\u3400-\u9fff]/.test(錯誤.message) ? 錯誤.message : '瀏覽器無法執行送出功能，請更新瀏覽器或改用其他瀏覽器，再重新開啟網頁。';
+  } finally {
+    問卷處理中 = false;
+    送出按鈕.disabled = false;
+    送出按鈕.textContent = '送出回覆 ↗';
+  }
+});
+
+取元素('#survey-retry').addEventListener('click', () => {
+  待送問卷 = null;
+  取元素('#survey-form').reset();
+  取元素('#survey-form').hidden = false;
+  取元素('#survey-success').hidden = true;
+  取元素('#survey-error').textContent = '';
+  取元素('#survey-form input').focus();
+});
+
+// 使用網址片段切換頁面，直接開啟根目錄的網頁檔案也能使用。
+function 讀取頁面() {
+  try { return decodeURIComponent(location.hash.slice(1)) || '總覽'; }
+  catch { return '總覽'; }
+}
+
+// 各訪客的快取也分開保存，未送出的修改會在重新連線後繼續送出。
+function 讀取本機資料(指定鍵) {
+  資料 = { tasks: [], transactions: [], notes: [], expenseCategories: [] };
+  Object.values(待同步).forEach((清單) => 清單.clear());
+  try {
+    const 上次訪客 = localStorage.getItem('日常上次訪客');
+    本機儲存鍵 = 指定鍵 || (上次訪客 ? `${儲存鍵}-${上次訪客}` : 儲存鍵);
+    const 原資料 = localStorage.getItem(本機儲存鍵);
+    if (原資料) {
+      const 讀取資料 = JSON.parse(原資料);
+      if (!檢查資料(讀取資料)) throw new Error('資料格式不符');
+      Object.keys(資料).forEach((鍵) => {
+        資料[鍵] = 讀取資料[鍵] || [];
+        const 佇列 = 讀取資料.待同步?.[鍵];
+        // 舊版本尚未上雲的紀錄，第一次連線時全部轉入。
+        const 識別碼清單 = 資料[鍵].map((項目) => 鍵 === 'expenseCategories' ? 項目 : 項目.id);
+        識別碼清單.forEach((識別碼) => { if (!Array.isArray(佇列) || 佇列.includes(識別碼)) 待同步[鍵].add(識別碼); });
+      });
+    }
+  } catch { 提示('無法讀取本機資料，請使用備份匯入。'); }
+  上次本機資料 = JSON.parse(JSON.stringify(資料));
+}
+
+function 切換頁面(頁面) {
+  顯示頁面(['總覽', '待辦', '行事曆', '記帳', '筆記', '問卷'].includes(頁面) ? 頁面 : '總覽');
+}
+
 取元素('#top-date').textContent = 今天.toLocaleDateString('zh-TW', { month: 'long', day: 'numeric', weekday: 'long' });
-切換頁面(decodeURIComponent(location.hash.slice(1)) || '總覽');
+讀取本機資料();
+切換頁面(讀取頁面());
+取元素('#sync-retry').addEventListener('click', 啟動雲端);
+window.addEventListener('online', 啟動雲端);
+啟動雲端();

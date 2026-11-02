@@ -66,3 +66,64 @@
 /* 圖片直接內嵌在首頁，放大原圖的中央標誌，不必另存圖片檔案。 */
 .brand-icon{position:relative;overflow:hidden;flex-shrink:0;background:transparent;border-radius:0;transform:none}
 .brand-icon img{position:absolute;left:50%;top:50%;width:360%;height:auto;max-width:none;transform:translate(-50%,-50%);display:block}
+
+/* 在記帳表單內新增分類，避免離開正在填寫的紀錄。 */
+.custom-category-fields{background:#f6f7f9;border:1px solid #e2e3e5;border-radius:8px;padding:13px;margin-top:16px}
+.custom-category-fields>label{display:block;font-size:11px;color:#626975;margin-bottom:8px}
+.custom-category-row{display:flex;gap:8px}
+.custom-category-row input{width:100%;min-width:0;border:1px solid #d8dee5;background:#fff;border-radius:6px;padding:9px;font-size:11px;color:var(--blue)}
+.custom-category-row input:focus{outline:2px solid #ed703e;outline-offset:1px}
+.custom-category-row button{flex-shrink:0;background:var(--blue);color:#fff;border-radius:6px;padding:8px 12px;font-size:10px}
+.custom-category-fields small{display:block;font-size:9px;color:#858c98;line-height:1.8;margin-top:8px}
+.legend-row>span{overflow-wrap:anywhere;max-width:120px}
+
+/* 問卷只保留兩題，使用大範圍的選項方便手機點選。 */
+.survey-panel{max-width:740px;margin:0 auto;background:#fff;border:1px solid #e2e3e5;border-radius:16px;overflow:hidden}
+.survey-intro{position:relative;background:var(--blue);color:#fff;padding:31px 35px;overflow:hidden}
+.survey-intro .eyebrow{color:#f3ba9e;display:block;font-size:10px;margin-bottom:12px}
+.survey-intro h2{position:relative;font-size:23px;font-weight:500;line-height:1.6;margin:0 0 10px}
+.survey-intro p{position:relative;font-size:11px;color:#c5cbd5;line-height:1.8;margin:0 0 17px}
+.survey-time{font-size:9px;display:inline-block;color:#fff;background:#ffffff14;border:1px solid #ffffff26;border-radius:20px;padding:6px 12px}
+.survey-symbol{position:absolute;right:23px;top:15px;font-size:160px;line-height:1;color:var(--orange);opacity:.4;transform:rotate(-12deg)}
+.survey-form{padding:32px 35px}
+.survey-form fieldset{min-width:0;border:0;margin:0 0 30px;padding:0}
+.survey-form legend{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:500;width:100%;padding:0;margin-bottom:17px;line-height:1.8}
+.question-number{color:var(--orange);font-size:11px;letter-spacing:1px}
+.survey-required{font-size:8px;color:#858c98;font-weight:400;margin-left:auto;white-space:nowrap}
+.survey-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}
+.survey-options label{position:relative;display:flex;align-items:center;gap:10px;padding:16px 13px;border:1px solid #e2e3e5;border-radius:8px;font-size:11px;cursor:pointer;transition:background .15s,border-color .15s}
+.survey-options label:hover{background:#f6f7f9}
+.survey-options label:has(input:checked){background:#fff0e8;border-color:var(--orange);color:#a34d26}
+.survey-options input{accent-color:var(--orange);width:15px;height:15px;margin:0;flex-shrink:0}
+.survey-options label>span{font-size:17px;color:#61718a}
+.feeling-options{grid-template-columns:repeat(3,minmax(0,1fr))}
+.survey-storage-note{font-size:9px;line-height:1.9;color:#858c98;margin:0 0 15px}
+.survey-submit{width:100%;padding:13px}
+#survey-error{font-size:10px;line-height:1.8;color:#b64f27}
+.survey-success{text-align:center;padding:40px 25px;outline:none}
+.survey-success-icon{display:grid;place-items:center;width:54px;height:54px;background:#fff0e8;color:var(--orange);border-radius:50%;font-size:26px;margin:0 auto 18px}
+.survey-success h3{font-size:17px;font-weight:500;margin:0 0 15px}
+.survey-success p{font-size:11px;color:#626975;line-height:1.9}
+.survey-success .secondary{margin-top:15px}
+@media(max-width:640px){.survey-intro{padding:26px 22px}.survey-intro h2{font-size:20px}.survey-form{padding:25px 18px}.survey-form legend{font-size:12px;gap:7px}.survey-options{gap:9px}.survey-options label{padding:14px 10px;font-size:10px;gap:7px}.feeling-options{grid-template-columns:1fr}.survey-symbol{right:6px;font-size:140px}.sidebar nav .nav-item{font-size:8px}}
+
+/* 切換頁面時確實隱藏不使用的區塊，送出期間停用按鈕。 */
+[hidden]{display:none!important}
+button:disabled{opacity:.55;cursor:wait}
+@media(max-width:640px){.topbar-right{gap:10px}}
+
+/* 導覽圖示使用向量線條，縮放後仍清楚，選取時沿用白色文字色彩。 */
+.nav-icon{display:grid;place-items:center;width:27px;height:27px;flex-shrink:0;line-height:1}
+.nav-icon svg{display:block;width:100%;height:100%}
+.nav-icon .icon-accent{stroke:var(--orange)}
+.nav-icon .icon-accent-fill{fill:var(--orange);stroke:var(--orange)}
+@media(max-width:900px){.nav-icon{width:23px;height:23px}}
+@media(max-width:640px){.nav-icon{width:25px;height:25px}}
+
+/* 同步狀態持續顯示，斷線時可手動重試，窄螢幕則改為上下排列。 */
+.sync-panel{display:flex;align-items:center;justify-content:space-between;gap:16px;border:1px solid #e2e3e5;background:#f7f7f6;border-radius:10px;padding:14px 18px;margin-bottom:24px}
+.sync-panel p{margin:0 0 6px;font-size:12px;color:var(--ink)}
+.sync-panel small{display:block;font-size:10px;line-height:1.8;color:var(--muted)}
+.sync-panel button{flex-shrink:0}
+.local-status{line-height:1.7}
+@media(max-width:640px){.sync-panel{align-items:stretch;flex-direction:column;padding:13px}.sync-panel button{align-self:flex-start}}
